@@ -94,12 +94,12 @@ def load(casp_version=12,
          aggregate_model_input=True,
          collate_fn=None,
          batch_size=32,
-         return_masks=False,
          seq_as_onehot=None,
          dynamic_batching=True,
          num_workers=2,
          optimize_for_cpu_parallelism=False,
-         train_eval_downsample=.2):
+         train_eval_downsample=.2,
+         filter_by_resolution=False):
     #: Okay
     """Load and return the specified SidechainNet dataset as a dictionary or DataLoaders.
 
@@ -109,7 +109,7 @@ def load(casp_version=12,
     (with_pytorch='dataloaders') for easy access for model training with PyTorch. Several
     arguments are also available to allow the user to specify how the data should be
     loaded and batched when provided as DataLoaders (aggregate_model_input, collate_fn,
-    batch_size, return_masks, seq_as_one_hot, dynamic_batching, num_workers,
+    batch_size, seq_as_one_hot, dynamic_batching, num_workers,
     optimize_for_cpu_parallelism, and train_eval_downsample.)
 
     Args:
@@ -138,14 +138,6 @@ def load(casp_version=12,
             necessarily be equal to this number (though, on average, it will be close
             to this number). Only applicable when with_pytorch='dataloaders' is provided.
             Defaults to 32.
-        return_masks (bool, optional): If True, when batching, returns sequence masks as a
-            Tensor of 1s and 0s (with 0s representing missing residues). In the batch,
-            masks are always provided in the tuple following the model input or sequences.
-            For example, with aggregated model input and return_masks=True, batching
-            yields tuples of (protein_ids, model_input, masks, angles, coordinates). If
-            aggregate_model_input=False, and return_masks=True, batching yields tuples of
-            (protein_ids, sequences, masks, PSSMs, angles, coordinates). Defaults to
-            False.
         seq_as_onehot (bool, optional): By default, the None value of this argument causes
             sequence data to be represented as one-hot vectors (L x 20) when batching and
             aggregate_model_input=True or to be represented as integer sequences (shape L,
@@ -174,6 +166,12 @@ def load(casp_version=12,
             epoch of training (which can be expensive), we can first downsample the
             training set at the start of training, and use that downsampled dataset during
             the whole of model training. Defaults to .2.
+        filter_by_resolution (float, bool, optional): If True, only use structures with a
+            reported resolution < 3 Angstroms. Structures wit no reported resolutions will
+            also be excluded. If filter_by_resolution is a float, then only structures
+            having a resolution value LESS than or equal this threshold will be included.
+            For example, a value of 2.5 will exclude all structures with resolution
+            greater than 2.5 Angstrom. Only the training set is filtered.
 
     Returns:
         A Python dictionary that maps data splits ('train', 'test', 'train-eval',
@@ -248,6 +246,7 @@ def load(casp_version=12,
         local_path = _download_sidechainnet(casp_version, thinning, scn_dir)
 
     scn_dict = _load_dict(local_path)
+    scn_dict = filter_dictionary_by_resolution(scn_dict, threshold=filter_by_resolution)
 
     # By default, the load function returns a dictionary
     if not with_pytorch:
@@ -260,7 +259,6 @@ def load(casp_version=12,
             collate_fn=collate_fn,
             batch_size=batch_size,
             num_workers=num_workers,
-            return_masks=return_masks,
             seq_as_onehot=seq_as_onehot,
             dynamic_batching=dynamic_batching,
             optimize_for_cpu_parallelism=optimize_for_cpu_parallelism,
@@ -269,93 +267,145 @@ def load(casp_version=12,
     return
 
 
-# TODO: Finish uploading files to Box for distribution
+def filter_dictionary_by_resolution(raw_data, threshold=False):
+    """Filter SidechainNet data by removing poor-resolution training entries.
+
+    Args:
+        raw_data (dict): SidechainNet dictionary.
+        threshold (float, bool): Entries with resolution values greater than this value 
+            are discarded. Test set entries have no measured resolution and are not
+            excluded. Default is 3 Angstroms. If False, nothing is filtered.
+
+    Returns:
+        Filtered dictionary.
+    """
+    if not threshold:
+        return raw_data
+    if isinstance(threshold, bool) and threshold is True:
+        threshold = 3
+    new_data = {
+        "seq": [],
+        "ang": [],
+        "ids": [],
+        "evo": [],
+        "msk": [],
+        "crd": [],
+        "sec": [],
+        "res": []
+    }
+    train = raw_data["train"]
+    n_filtered_entries = 0
+    total_entires = 0.
+    for seq, ang, crd, msk, evo, _id, res, sec in zip(train['seq'], train['ang'],
+                                                      train['crd'], train['msk'],
+                                                      train['evo'], train['ids'],
+                                                      train['res'], train['sec']):
+        total_entires += 1
+        if not res or res > threshold:
+            n_filtered_entries += 1
+            continue
+        else:
+            new_data["seq"].append(seq)
+            new_data["ang"].append(ang)
+            new_data["ids"].append(_id)
+            new_data["evo"].append(evo)
+            new_data["msk"].append(msk)
+            new_data["crd"].append(crd)
+            new_data["sec"].append(sec)
+            new_data["res"].append(res)
+    if n_filtered_entries:
+        print(f"{n_filtered_entries} ({n_filtered_entries/total_entires:.1%})"
+              " training set entries were excluded based on resolution.")
+    raw_data["train"] = new_data
+    return raw_data
+
+
 BOXURLS = {
     # CASP 12
     "sidechainnet_casp12_30.pkl":
-        "https://pitt.box.com/shared/static/sjnecyqfm8hkqf0nk5yz1cf3ct4dygyf.pkl",
+        "https://pitt.box.com/shared/static/hbatd2a750tx8e27yizwinc3hsceeeui.pkl",
     "sidechainnet_casp12_50.pkl":
-        "https://pitt.box.com/shared/static/h2sdnmxgobh9duamfzqvinjbx0tswn1i.pkl",
+        "https://pitt.box.com/shared/static/7cng5zdi2s4doruh1m512d281w2cmk0z.pkl",
     "sidechainnet_casp12_70.pkl":
-        "https://pitt.box.com/shared/static/7ikrp46bej1wylieqjpw76ceabcnc7r4.pkl",
+        "https://pitt.box.com/shared/static/xfaktrj8ole0eqktxi5fa4qp9efum8f2.pkl",
     "sidechainnet_casp12_90.pkl":
-        "https://pitt.box.com/shared/static/yn5ucsxwo9bp01yp23jltseg4j8sb3f8.pkl",
+        "https://pitt.box.com/shared/static/nh7vybjjm224m1nezrgmnywxsa4st2uk.pkl",
     "sidechainnet_casp12_95.pkl":
-        "https://pitt.box.com/shared/static/k3fr29s5dyckj6f535silvqab6ikai43.pkl",
+        "https://pitt.box.com/shared/static/wcz1kex8idnpy8zx7a59r3h6e216tlq1.pkl",
     "sidechainnet_casp12_100.pkl":
-        "https://pitt.box.com/shared/static/52ggdgl60optmp57b5mcwocv4cabwmbv.pkl",
+        "https://pitt.box.com/shared/static/ey5xh6l4p8iwzrxtxwpxt7oeg70eayl4.pkl",
 
     # CASP 11
     "sidechainnet_casp11_30.pkl":
-        "",
+        "https://pitt.box.com/shared/static/fzil4bgxt4fqpp416xw0e3y0ew4c7yct.pkl",
     "sidechainnet_casp11_50.pkl":
-        "",
+        "https://pitt.box.com/shared/static/rux3p18k523y8zbo40u1l856826buvui.pkl",
     "sidechainnet_casp11_70.pkl":
-        "",
+        "https://pitt.box.com/shared/static/tl51ym0hzjdvq4qs5f5shsj0sl9mkvd0.pkl",
     "sidechainnet_casp11_90.pkl":
-        "",
+        "https://pitt.box.com/shared/static/iheqs3vqszoxsdq46nkzf5kylt8ecjbx.pkl",
     "sidechainnet_casp11_95.pkl":
-        "",
+        "https://pitt.box.com/shared/static/gbme2a5yifpugtmthwu2989xxyg5b8i6.pkl",
     "sidechainnet_casp11_100.pkl":
-        "",
+        "https://pitt.box.com/shared/static/3cfx02k2yw4ux2mrbvwrrj91zsftcpbj.pkl",
 
     # CASP 10
     "sidechainnet_casp10_30.pkl":
-        "",
+        "https://pitt.box.com/shared/static/fe0hpjrldi2y1g374mgdzfpdipajd6s4.pkl",
     "sidechainnet_casp10_50.pkl":
-        "",
+        "https://pitt.box.com/shared/static/tsnt6s07txas0h37cpzepck580yme9vv.pkl",
     "sidechainnet_casp10_70.pkl":
-        "",
+        "https://pitt.box.com/shared/static/awmzr4jj68p61ab031smixryt69p8ykm.pkl",
     "sidechainnet_casp10_90.pkl":
-        "",
+        "https://pitt.box.com/shared/static/it6zcugy997c1550kima3m3fu8kamnh8.pkl",
     "sidechainnet_casp10_95.pkl":
-        "",
+        "https://pitt.box.com/shared/static/q6ld9h276kobhmmtvdq581qnm61oevup.pkl",
     "sidechainnet_casp10_100.pkl":
-        "",
+        "https://pitt.box.com/shared/static/fpixgzh9n86xyzpwtlc74lle4fd3p5es.pkl",
 
     # CASP 9
     "sidechainnet_casp9_30.pkl":
-        "",
+        "https://pitt.box.com/shared/static/j1h3181d2mibqvc7jrqm17dprzj6pxmc.pkl",
     "sidechainnet_casp9_50.pkl":
-        "",
+        "https://pitt.box.com/shared/static/l363lu9ztpdmcybthtytwnrvvkib2228.pkl",
     "sidechainnet_casp9_70.pkl":
-        "",
+        "https://pitt.box.com/shared/static/4uh1yggpdhm0aoeisomnyfuac4j20qzc.pkl",
     "sidechainnet_casp9_90.pkl":
-        "",
+        "https://pitt.box.com/shared/static/scv7l6qfr2j93pn4cu40ouhmxbns6k7x.pkl",
     "sidechainnet_casp9_95.pkl":
-        "",
+        "https://pitt.box.com/shared/static/tqpugpr7wamvmkyrtd8tqnzft6u53zha.pkl",
     "sidechainnet_casp9_100.pkl":
-        "",
+        "https://pitt.box.com/shared/static/jjtubu2lxwlv1aw8tfc7u27vcf2yz39v.pkl",
 
     # CASP 8
     "sidechainnet_casp8_30.pkl":
-        "",
+        "https://pitt.box.com/shared/static/1hx2n3y2gn3flnlsw2wb1e4l4nlru5mz.pkl",
     "sidechainnet_casp8_50.pkl":
-        "",
+        "https://pitt.box.com/shared/static/4u8tuqkm5pv34hm139uw9dqc4ieebsue.pkl",
     "sidechainnet_casp8_70.pkl":
-        "",
+        "https://pitt.box.com/shared/static/vj58yaeph55zjb04jezmqams66mn4bil.pkl",
     "sidechainnet_casp8_90.pkl":
-        "",
+        "https://pitt.box.com/shared/static/1ry2j47lde7zk5fxzvuffv05k1gq29oh.pkl",
     "sidechainnet_casp8_95.pkl":
-        "",
+        "https://pitt.box.com/shared/static/9uaw2tv61xyfd8gtw9n8e3hfcken4t4x.pkl",
     "sidechainnet_casp8_100.pkl":
-        "",
+        "https://pitt.box.com/shared/static/crk59vz6dw9cbbvne10owa450zgv1j79.pkl",
 
     # CASP 7
     "sidechainnet_casp7_30.pkl":
-        "",
+        "https://pitt.box.com/shared/static/hjblmbwei2dkwhfjatttdmamznt1k9ef.pkl",
     "sidechainnet_casp7_50.pkl":
-        "",
+        "https://pitt.box.com/shared/static/4pw56huei1123a5rd6g460886kg0pex7.pkl",
     "sidechainnet_casp7_70.pkl":
-        "",
+        "https://pitt.box.com/shared/static/afyow2ki9mwuoago0bzlsp5ame8dq12g.pkl",
     "sidechainnet_casp7_90.pkl":
-        "",
+        "https://pitt.box.com/shared/static/phsbdw8bj1oiv61d6hps0j62324820f3.pkl",
     "sidechainnet_casp7_95.pkl":
-        "",
+        "https://pitt.box.com/shared/static/2lgbtdw6c5df0qpe7dtnlaawowy9ic5r.pkl",
     "sidechainnet_casp7_100.pkl":
-        "",
+        "https://pitt.box.com/shared/static/6qipxz2z2n12a06vln5ucmzu4dcyw5ee.pkl",
 
     # Other
-    "debug.pkl":
-        "https://pitt.box.com/shared/static/t1t9ahdhgv5h8937rdani9ihp34gs7bu.pkl"
+    "sidechainnet_debug.pkl":
+        "https://pitt.box.com/shared/static/tevlb6nuii6kk520vi4x0u7li0eoxuep.pkl"
 }

@@ -3,7 +3,7 @@ SidechainNet
 [//]: # (Badges)
 [![Travis Build Status](https://travis-ci.com/jonathanking/sidechainnet.svg?branch=master)](https://travis-ci.com/jonathanking/sidechainnet)
 
-**[Colab Walkthrough](https://colab.research.google.com/drive/1WLaXUK0n2t1FLapFbr1hPQI5o23WAgqm?usp=sharing)**
+**[Colab Walkthrough](https://colab.research.google.com/drive/11ZZyqwfu7ZTyUKdqt9uy59AqqYccRVcU?usp=sharing), [arXiv](https://arxiv.org/abs/2010.08162)**
 
 SidechainNet is a protein structure prediction dataset that directly extends [ProteinNet](https://github.com/aqlaboratory/proteinnet)<sup>1</sup> by Mohammed AlQuraishi.
 
@@ -20,17 +20,21 @@ Specifically, SidechainNet adds measurements for protein angles and coordinates 
 | Entry | Dimensionality* | Label in SidechainNet data | ProteinNet | SidechainNet | 
 | :---: | :---: |  :---: | :---: | :---: | 
 | Primary sequence | *L x 1* | `seq` | X | X | 
+| Secondary structure ([DSSP](https://swift.cmbi.umcn.nl/gv/dssp/DSSP_2.html))<sup>\*\*</sup> | *L x 1* | `sec` | X | X |
 | [PSSM](https://en.wikipedia.org/wiki/Position_weight_matrix) + Information content | *L x 21* |  `evo` | X | X | 
 | Missing residue mask | *L x 1* |  `msk` | X | X | 
-| Backbone coordinates | *L x 4<sup>\*\*</sup> x 3* |  `crd`, subset `[0:4]` | X | X | 
+| Backbone coordinates | *L x 4<sup>\*\*\*</sup> x 3* |  `crd`, subset `[0:4]` | X | X | 
 | Backbone torsion angles | *L x 3* |  `ang`, subset `[0:3]` |  | X | 
 | Backbone bond angles | *L x 3* |  `ang`, subset `[3:6]` |  | X | 
 | Sidechain torsion angles | *L x 6* |   `ang`, subset `[6:12]` |  | X | 
 | Sidechain coordinates | *L x 10 x 3* |  `crd`, subset `[4:14]` |  | X | 
+| Structure resolution | *1* | `res` | | X |
 
 **L* reperesents the length of any given protein in the dataset.
 
-<sup>**</sup>SidechainNet explicitly includes oxygen atoms as part of the backbone coordinate data in contrast to ProteinNet, which only includes the primary `N, C_alpha, C` atoms.
+<sup>*\*</sup>Secondary structure is acquired from ProteinNet for training sets only. (Added January 2021)
+
+<sup>**\*</sup>SidechainNet explicitly includes oxygen atoms as part of the backbone coordinate data in contrast to ProteinNet, which only includes the primary `N, C_alpha, C` atoms.
 
 ## Installation
 To run this code, it's recommended to first clone the repo into an appropriate source directory with `git clone <CLONE_URL>`. Then, perform a developmental install of the package with pip in your current environment with `pip install -e .`. This will install the `sidechainnet` package in your environment.
@@ -51,6 +55,7 @@ data = {"train": {"seq": [seq1, seq2, ...],  # Sequences
                   "ang": [ang1, ang2, ...],  # Angles
                   "crd": [crd1, crd2, ...],  # Coordinates
                   "evo": [evo1, evo2, ...],  # PSSMs and Information Content
+                  "sec": [sec1, sec2, ...],  # Secondary structure labels (DSSP)
                   "ids": [id1, id2,   ...],  # Corresponding ProteinNet IDs
                   },
         "valid-10": {...},
@@ -59,7 +64,7 @@ data = {"train": {"seq": [seq1, seq2, ...],  # Sequences
         "test":     {...},
         "settings": {...},
         "description" : "SidechainNet for CASP 12."
-        "date": "September 20, 2020"
+        "date": "January 20, 2020"
         }
 ```
 By default, the `load` function downloads the data from the web into the current directory and loads it as a Python dictionary. If the data already exists locally, it reads it from disk. Other than the requirement that the data must be loaded using Python, this method of data loading is agnostic to any downstream analyses
@@ -67,7 +72,6 @@ By default, the `load` function downloads the data from the web into the current
 ### Loading SidechainNet with PyTorch DataLoaders
 The `load` function can also be used to load SidechainNet data as a dictionary of `torch.utils.data.DataLoader` objects. PyTorch `DataLoaders` make it simple to iterate over dataset items for training machine learning models. This method is recommended for using SidechainNet data with PyTorch.
 
-By default, the provided `DataLoader`s use a custom batching method that randomly generates batches of proteins of similar length. For faster training, it generates larger batches when the average length of proteins in the batch is small, and smaller batches when the proteins are large. The probability of selecting small-length batches is decreased so that each protein in SidechainNet is included in a batch with equal probability. See `dynamic_batching` and `collate_fn` arguments for more information on modifying this behavior. In the example below, `model_input` is a collated Tensor containing sequence and PSSM information.
 
 ```python
 >>> dataloaders = scn.load(casp_version=12, with_pytorch="dataloaders")
@@ -76,25 +80,20 @@ By default, the provided `DataLoader`s use a custom batching method that randoml
 >>> dataloaders['train'].dataset
 ProteinDataset(casp_version=12, split='train', n_proteins=81454,
                created='Sep 20, 2020')
->>> for protein_id, protein_seqs, model_input, true_angles, true_coords in dataloaders['train']:
-....    predicted_angles = model(model_input)
-....    predicted_coords = angles_to_coordinates(predicted_angles)
-....    loss = compute_loss(predicted_angles, predicted_coords,
-                            true_angles, true_coords)
+>>> for batch in dataloaders['train']:
+....    predicted_angles = model(batch.seqs)
+....    sb = scn.BatchedStructureBuilder(batch.int_seqs, predicted_angles)
+....    predicted_coords = sb.build()
+....    loss = compute_loss(batch.angs, batch.crds,               # True values
+....                        predicted_angles, predicted_coords)   # Predicted values
 ....    ...
 
 ```
 
-We have also made it possible to access the protein sequence and PSSM data directly when training by adding `aggregate_model_input=False` to `scn.load`.
+For more information on the `batch` variable, see the section *Using SidechainNet to train an all-atom protein structure prediction model* below.
 
-```python
->>> dataloaders = scn.load(casp_version=12, with_pytorch="dataloaders",
-                           aggregate_model_input=False)
->>> for (protein_id, sequence, mask, pssm, true_angles,
-         true_coords) in dataloaders['train']:
-....    prediction = model(sequence, pssm)
-....    ...
-```
+By default, the provided `DataLoader`s use a custom batching method that randomly generates batches of proteins of similar length. For faster training, it generates larger batches when the average length of proteins in the batch is small, and smaller batches when the proteins are large. The probability of selecting small-length batches is decreased so that each protein in SidechainNet is included in a batch with equal probability. See `dynamic_batching` and `collate_fn` arguments for more information on modifying this behavior. In the example below, `model_input` is a collated Tensor containing sequence and PSSM information.
+
 
 ### Converting Angle Representations into All-Atom Structures
 An important component of this work is the inclusion of both angular and 3D coordinate representations of each protein. Researchers who develop methods that rely on angular representations may be interested in converting this information into 3D coordinates. For this reason, SidechainNet provides a method to convert the angles it provides into Cartesian coordinates.
@@ -102,9 +101,9 @@ An important component of this work is the inclusion of both angular and 3D coor
 In the below example, `angles` is a NumPy matrix or Torch Tensor following the same organization as the NumPy angle matrices provided in SidechainNet. `sequence` is a string representing the protein's amino acid sequence.
 
 ```python
->>> (len(sequence), angles.shape)  # 12 angles per residue
+>>> (len(batch.seqs), batch.angs.shape)  # 12 angles per residue
 (128, (128, 12))
->>> sb = scn.StructureBuilder(sequence, angles)
+>>> sb = scn.StructureBuilder(batch.seqs, batch.angs)
 >>> coords = sb.build()
 >>> coords.shape  # 14 atoms per residue (128*14 = 1792)
 (1792, 3)
@@ -133,38 +132,51 @@ data = scn.load(casp_version=12,thinning=30, with_pytorch="dataloaders")
 
 for epoch in range(100):
     # Training epoch
-    for protein_ids, protein_seqs, model_input, tgt_angles, tgt_coords in data['train']:
-        predictions = model(model_input)
-        loss = loss_fn(predictions, tgt_angles, tgt_coords)
+    for batch in data['train']:
+        predictions = model(batch.seqs)
+        loss = loss_fn(predictions, batch.angs, batch.crds)
         loss.backwards()
         ...
     
     # Evaluate performance on down-sampled training set for efficiency
-    for protein_ids, protein_seqs, model_input, tgt_angles, tgt_coords in data['train-eval']:
-        predictions = model(model_input)
-        loss = loss_fn(predictions, tgt_angles, tgt_coords)
+    for batch in data['train-eval']:
+        predictions = model(batch.seqs)
+        loss = loss_fn(predictions, batch.angs, batch.crds)
         loss.backwards()
         ...
 
     # Evaluate performance on each of the 7 validation sets
     for valid_set in [data[f'valid-{split}'] for split in scn.utils.download.VALID_SPLITS]:
-        for protein_ids, protein_seqs, model_input, tgt_angles, tgt_coords in valid_set:
-            predictions = model(model_input)
-            loss = loss_fn(predictions, tgt_angles, tgt_coords)
+        for batch in valid_set:
+            predictions = model(batch.seqs)
+            loss = loss_fn(predictions, batch.angs, batch.crds)
             loss.backwards()
             ...
 
 # Evaluate performance on test set
-for protein_ids, protein_seqs, model_input, tgt_angles, tgt_coords in data['test']:
-    predictions = model(model_input)
-    loss = loss_fn(predictions, tgt_angles, tgt_coords)
+for batch in data['test']:
+    predictions = model(batch.seqs)
+    loss = loss_fn(predictions, batch.angs, batch.crds)
     ...
 ```
+
+The `batch` variable above is a `collections.namedtuple` that has the following attributes:
+
+| Atribute | Description |
+| :---: | :--- |
+ | `batch.pids` | Tuple of ProteinNet/SidechainNet IDs for proteins in this batch |
+ | `batch.seqs` | Tensor of sequences, either as integers or as one-hot vectors depending on value of `scn.load(... seq_as_onehot)` |
+| `batch.msks` | Tensor of missing residue masks, (redundant with padding in data) |
+| `batch.evos` | Tensor of Position Specific Scoring Matrix + Information Content |
+| `batch.secs` | Tensor of secondary structure, either as integers or one-hot vectors depending on value of `scn.load(... seq_as_onehot)` |
+| `batch.angs` | Tensor of angles |
+| `batch.crds` | Tensor of coordinates |
+| `batch.seq_evo_sec` | Tensor that concatenates values of `seqs`, `evos`, and `secs`. Returned when `scn.load(... aggregate_model_input=True)`.
 
 
 ## Reproducing SidechainNet
 
-If you would like to reproduce our work or make modifications to the dataset, you may follow [these directions](how_to_reproduce.md) below to generate SidechainNet from scratch.
+If you would like to reproduce our work or make modifications to the dataset, you may follow [these directions](how_to_reproduce.md) to generate SidechainNet from scratch.
 
 
 ## Package Requirements
@@ -190,10 +202,11 @@ Project structure (continuous integration, docs, testing) based on the
 [Computational Molecular Science Python Cookiecutter](https://github.com/molssi/cookiecutter-cms) version 1.1.
 
 ## References
+1. [SidechainNet: An All-Atom Protein Structure Dataset for Machine Learning](https://arxiv.org/abs/2010.08162). J.E. King, D. Koes. arXiv (2020).
 1. [ProteinNet: a standardized data set for machine learning of protein structure.](https://doi.org/10.1186/s12859-019-2932-0). M. AlQuraishi. BMC Bioinformatics 20, 311 (2019).
 2. [3dmol.js: molecular visualization with WebGL.](https://doi.org/10.1093/bioinformatics/btu829) N. Rego and D. Koes. Bioinformatics, 31(8):1322–1324, (2014).
  
 
 ## Copyright
 
-Copyright (c) 2020, Jonathan King
+Copyright (c) 2021, Jonathan King

@@ -1,6 +1,7 @@
 """Functionality for parsing raw ProteinNet files."""
 
 import itertools
+import json
 import multiprocessing
 import os
 import pickle
@@ -247,6 +248,16 @@ def parse_astral_summary_file(lines):
     return d
 
 
+def parse_dssp_file(path):
+    """Parse AlQuraishi's DSSP files provided from ProteinNet."""
+    with open(path, "r") as f:
+        data = json.load(f)
+    new_dict = {}
+    for key in data:
+        new_dict[key] = data[key]["DSSP"]
+    return new_dict
+
+
 def get_chain_from_astral_id(astral_id, d):
     """Given an ASTRAL ID and the ASTRAL->PDB/chain mapping dictionary, this function
     attempts to return the relevant, parsed ProDy object."""
@@ -258,6 +269,13 @@ def get_chain_from_astral_id(astral_id, d):
     if astral_id == "d4qrye_" or astral_id in ASTRAL_IDS_INCORRECTLY_PARSED:
         chain = "A"
         resnums = ""
+
+    # Handle special case https://github.com/prody/ProDy/issues/1197
+    if astral_id == "d1tocr1":
+        # a = pr.performDSSP("1toc")
+        a = pr.parsePDB("1toc", chain="R")
+        a = a.select("(chain R) and (resnum 2 to 59 or resnum 1A)")  # Note there is no 1B
+        return a
 
     a = pr.parsePDB(pdbid, chain=chain)
     if resnums != "":
@@ -277,8 +295,8 @@ def get_chain_from_astral_id(astral_id, d):
             selection_str = f"resnum {range_str}"
         elif (start_icode and not end_icode) or (not start_icode and end_icode):
             # If there's only one insertion code, this selection is not well defined
-            # and we pretend the insertion code doesn't exist.
-            selection_str = f"resnum {range_str}"
+            # and must be handled by special cases above.
+            raise ValueError(f"Unsupported ASTRAL range {astral_id}.")
         elif start_icode and end_icode:
             if start_icode == end_icode:
                 selection_str = f"resnum {range_str} and icode {start_icode}"
